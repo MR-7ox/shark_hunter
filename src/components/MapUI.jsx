@@ -1,10 +1,8 @@
 // src/components/MapUI.jsx (FINAL DEBUGGED VERSION)
 
-import React, { useState, useMemo } from 'react';
-// FIX: Removed unused 'useMap'
-import { MapContainer, TileLayer, GeoJSON, Marker, Popup } from 'react-leaflet';
+import React, { useState, useMemo, useEffect } from 'react';
+import { MapContainer, TileLayer, GeoJSON, Marker, Popup, useMap, Polyline } from 'react-leaflet';
 import 'leaflet/dist/leaflet.css';
-// NOTE: Assuming simData.js is correctly defined
 import { HotspotFrames, SharkTrack } from '../data/simData'; 
 import L from 'leaflet';
 
@@ -18,6 +16,22 @@ L.Icon.Default.mergeOptions({
 
 const defaultCenter = [39.0, -56.0]; // Centered near the Gulf Stream area
 const defaultZoom = 6;
+
+// --- Region Center Definitions ---
+const regionCenters = {
+  "North Atlantic": { center: [39.0, -56.0], zoom: 6 },
+  "California Current": { center: [36.5, -122.0], zoom: 5 },
+  "Mozambique Channel": { center: [-18.0, 41.0], zoom: 5 }
+};
+
+// --- Helper to Change Map View ---
+function ChangeMapView({ center, zoom }) {
+  const map = useMap();
+  useEffect(() => {
+    map.setView(center, zoom);
+  }, [center, zoom, map]);
+  return null;
+}
 
 // --- Helper Functions ---
 
@@ -56,28 +70,63 @@ const PaceTrackerTagContent = () => (
 );
 
 
+// --- Add API call function ---
+async function fetchSharkPrediction(ocean, coords, features) {
+  try {
+    const response = await fetch('http://127.0.0.1:5000/predict_sharks', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify([{ ocean, coords, features }])
+    });
+    return await response.json();
+  } catch (err) {
+    return [{ error: err.message }];
+  }
+}
+
+// --- Helper: Interpolate between two points for smooth animation ---
+function interpolateCoords(start, end, t) {
+  return [
+    start[0] + (end[0] - start[0]) * t,
+    start[1] + (end[1] - start[1]) * t
+  ];
+}
+
 // --- Main Map Component ---
 
 const MapUI = () => {
-  const [currentTime, setCurrentTime] = useState(1); 
-  const [activeLayers, setActiveLayers] = useState({ 
-    hotspot: true, 
-    swot: false, 
+  // --- NEW: Region Selection State ---
+  const [selectedRegion, setSelectedRegion] = useState('North Atlantic');
+
+  // --- NEW: Animation Frame State ---
+  const [currentFrameIndex, setCurrentFrameIndex] = useState(0);
+  const totalFrames = HotspotFrames.length;
+
+  // --- Animation Loop ---
+  useEffect(() => {
+    const interval = setInterval(() => {
+      setCurrentFrameIndex(prev => (prev + 1) % totalFrames);
+    }, 5000); // 5s per frame, 15s total for 3 frames
+    return () => clearInterval(interval);
+  }, [totalFrames]);
+
+  // --- Layer Toggles ---
+  const [activeLayers, setActiveLayers] = useState({
+    hotspot: true,
+    swot: false,
     pace: false,
     modis: false
   });
 
   // --- Data Calculations ---
   const currentFrameData = useMemo(() => {
-    return HotspotFrames.find(f => f.time === currentTime);
-  }, [currentTime]);
+    return HotspotFrames[currentFrameIndex];
+  }, [currentFrameIndex]);
 
   const currentSharkPos = useMemo(() => {
-    // FIX 4: Accesses the correct object properties from the SharkTrack array
-    const pos = SharkTrack.find(t => t.time === currentTime);
-    // Returns a safe fallback array for the Marker position if time is not found
-    return pos || { lat: defaultCenter[0], lon: defaultCenter[1], status: 'Unknown' };
-  }, [currentTime]);
+    const pos = SharkTrack.find(t => t.time === currentFrameIndex);
+    return pos || { lat: regionCenters[selectedRegion].center[0], lon: regionCenters[selectedRegion].center[1], status: 'Unknown' };
+  }, [currentFrameIndex, selectedRegion]);
 
   // --- UI Handlers ---
   const toggleLayer = (layerName) => {
@@ -119,6 +168,41 @@ const MapUI = () => {
     <p>The shark is currently **{currentSharkPos.status.toLowerCase()}** in low-probability waters (Blue Zone). Environmental factors are not yet optimal for deep foraging.</p>
   );
 
+  const [predictionResult, setPredictionResult] = useState(null);
+
+  // --- Example: Call Flask API when region or frame changes ---
+  useEffect(() => {
+    // Example features for demo; replace with real features as needed
+    const features = [1, 0.9, 1.8, 0.7];
+    const coords = [currentSharkPos.lat, currentSharkPos.lon];
+    const ocean = selectedRegion === "North Atlantic" ? "Atlantic" : "Indian Ocean";
+    fetchSharkPrediction(ocean, coords, features).then(setPredictionResult);
+  }, [selectedRegion, currentFrameIndex]);
+
+  // --- Shark Animation State ---
+  const [animationProgress, setAnimationProgress] = useState(0);
+
+  // --- Animation Effect (smooth transition between frames) ---
+  useEffect(() => {
+    let frame = 0;
+    const steps = 50; // More steps = smoother
+    const interval = setInterval(() => {
+      setAnimationProgress(frame / steps);
+      frame++;
+      if (frame > steps) frame = 0;
+    }, 100); // 100ms per step
+    return () => clearInterval(interval);
+  }, [currentFrameIndex]);
+
+  // --- Calculate animated position ---
+  const prevFrame = SharkTrack.find(t => t.time === (currentFrameIndex === 0 ? totalFrames - 1 : currentFrameIndex - 1));
+  const nextFrame = currentSharkPos;
+  const animatedPos = prevFrame
+    ? interpolateCoords([prevFrame.lat, prevFrame.lon], [nextFrame.lat, nextFrame.lon], animationProgress)
+    : [currentSharkPos.lat, currentSharkPos.lon];
+
+  // --- Shark Path Polyline ---
+  const sharkPath = SharkTrack.slice(0, currentFrameIndex + 1).map(t => [t.lat, t.lon]);
 
   return (
     <div style={{ height: '100vh', width: '100vw', display: 'flex' }}>
@@ -126,25 +210,23 @@ const MapUI = () => {
       {/* --- Sidebar for Controls and Explanations --- */}
       <div style={{ width: '25%', padding: '20px', backgroundColor: '#f0f0f0', overflowY: 'auto' }}>
         <h2>Dynamic Shark Hotspot Model</h2>
-        
-        {/* Time Slider Control */}
-        <div style={{ marginBottom: '20px' }}>
-          <label htmlFor="time-slider" style={{ display: 'block' }}>Narrative Time Step: **T{currentTime}**</label>
-          <input 
-            id="time-slider"
-            type="range"
-            min="0"
-            max={HotspotFrames.length - 1}
-            value={currentTime}
-            onChange={(e) => setCurrentTime(parseInt(e.target.value))}
-            style={{ width: '100%' }}
-          />
-        </div>
 
+        {/* --- NEW: Ocean Region Selector --- */}
+        <h4>Select Ocean Region</h4>
+        <select
+          value={selectedRegion}
+          onChange={e => setSelectedRegion(e.target.value)}
+          style={{ width: '100%', padding: '8px', marginBottom: '15px' }}
+        >
+          <option value="North Atlantic">North Atlantic (Gulf Stream)</option>
+          <option value="California Current">California Current (White Sharks)</option>
+          <option value="Mozambique Channel">Mozambique Channel (Whale Sharks)</option>
+        </select>
+        <p>Selected Region: <strong>{selectedRegion}</strong></p>
         <hr />
-        
-        {/* --- Model Insight Narrative --- */}
-        <h4>Model Insight at T{currentTime}</h4>
+
+        {/* --- Display Current Frame Index --- */}
+        <h4>Model Insight at T{currentFrameIndex}</h4>
         {currentHotspotNarrative}
         
         <hr />
@@ -182,11 +264,14 @@ const MapUI = () => {
       
       {/* --- Map View --- */}
       <MapContainer 
-        center={defaultCenter} 
-        zoom={defaultZoom} 
+        center={regionCenters[selectedRegion].center} 
+        zoom={regionCenters[selectedRegion].zoom} 
         style={{ height: '100vh', width: '75%' }}
         scrollWheelZoom={true}
       >
+        {/* --- Change Map View on Region Change --- */}
+        <ChangeMapView center={regionCenters[selectedRegion].center} zoom={regionCenters[selectedRegion].zoom} />
+
         <TileLayer
           attribution='&copy; <a href="http://osm.org/copyright">OpenStreetMap</a> contributors | NASA PACE/SWOT Concept'
           url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
@@ -247,8 +332,9 @@ const MapUI = () => {
         )}
         
         {/* 4. Shark Animation Marker (The Ground Truth) */}
+        <Polyline positions={sharkPath} color="blue" weight={3} opacity={0.5} />
         <Marker 
-            position={[currentSharkPos.lat, currentSharkPos.lon]} 
+            position={animatedPos} 
             icon={L.divIcon({ 
                 className: 'shark-icon', 
                 html: '<span style="font-size: 30px;">🦈</span>', 
@@ -261,7 +347,15 @@ const MapUI = () => {
                 Shark ID: Lydia (Hypothetical)<br/>
                 Status: **{currentSharkPos.status}**<br/>
                 ---<br/>
-                {/* 2. Conceptual Tag Pop-up */}
+                {predictionResult && predictionResult[0] && !predictionResult[0].error && (
+                  <div>
+                    <b>Model Probability:</b> {predictionResult[0].probability}<br/>
+                    <b>Weather:</b> {predictionResult[0].features_used ? predictionResult[0].features_used.join(', ') : 'N/A'}
+                  </div>
+                )}
+                {predictionResult && predictionResult[0] && predictionResult[0].error && (
+                  <div style={{color: 'red'}}>Error: {predictionResult[0].error}</div>
+                )}
                 <PaceTrackerTagContent />
             </Popup>
         </Marker>
